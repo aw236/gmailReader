@@ -30,7 +30,7 @@ def get_gmail_service():
     return build('gmail', 'v1', credentials=creds)
 
 
-def get_threads_involving_user(service, user_email, max_results=100):
+def get_threads_involving_user(service, user_email, max_results=2000):
     """Fetch threads involving a specific user."""
     try:
         query = f'{user_email}'
@@ -51,21 +51,37 @@ def get_threads_involving_user(service, user_email, max_results=100):
 
 
 def clean_body_text(body):
-    """Clean up the email body by removing excessive line breaks and normalizing spacing."""
+    """Clean up the email body by preserving paragraph breaks and removing excessive spacing."""
     # Split into lines and strip whitespace
     lines = [line.strip() for line in body.split('\n')]
-    # Remove empty lines
-    lines = [line for line in lines if line]
-    # Join lines with a single space, treating multiple line breaks as a single space
-    cleaned_body = ' '.join(lines)
+    # Remove excessive empty lines, but preserve single empty lines between paragraphs
+    cleaned_lines = []
+    previous_line_empty = False
+    for line in lines:
+        if line:
+            cleaned_lines.append(line)
+            previous_line_empty = False
+        else:
+            if not previous_line_empty:  # Only add one empty line between paragraphs
+                cleaned_lines.append('')
+                previous_line_empty = True
+    # Join lines with single newlines
+    cleaned_body = '\n'.join(cleaned_lines).strip()
     return cleaned_body
 
 
 def remove_quoted_text(body):
-    """Remove quoted text from the email body."""
+    """Remove quoted text, signatures, and footers from the email body."""
+    # Split into lines
     lines = body.split('\n')
+    # Remove lines starting with '>' (quoted text)
     cleaned_lines = [line for line in lines if not line.strip().startswith('>')]
-    cleaned_lines = [line for line in cleaned_lines if not line.strip().startswith('On ') or ' wrote:' not in line]
+    # Remove lines starting with "On [date], [sender] wrote:"
+    cleaned_lines = [line for line in cleaned_lines if not (line.strip().startswith('On ') and ' wrote:' in line)]
+    # Remove everything after a signature marker (e.g., "-- ")
+    signature_index = next((i for i, line in enumerate(cleaned_lines) if line.strip().startswith('--')),
+                           len(cleaned_lines))
+    cleaned_lines = cleaned_lines[:signature_index]
     return '\n'.join(cleaned_lines).strip()
 
 
@@ -95,14 +111,14 @@ def get_emails_in_thread(service, thread_id):
                     html_content = html_part.get_content().strip()
                     h = html2text.HTML2Text()
                     h.ignore_links = False
-                    h.body_width = 0  # Prevent html2text from wrapping lines
+                    h.body_width = 0
                     body = h.handle(html_content).strip()
                 else:
                     body = "No plaintext or HTML content found."
 
-            # Remove quoted text first
+            # Remove quoted text and signatures
             body = remove_quoted_text(body)
-            # Clean up extra line breaks and spacing
+            # Clean up spacing while preserving paragraphs
             body = clean_body_text(body)
 
             email_data.append({
@@ -132,14 +148,17 @@ def save_to_file(email_data, user_email, filename):
 
 
 if __name__ == '__main__':
-    user_email = "asdf123@gmail.com"
+    # user_email = "premierpadsrentals@gmail.com" # works well
+    # user_email = "chuchudragon@gmail.com" # works well: No threads found involving chuchudragon@gmail.com.
+    # user_email = "chuchudragon22@gmail.com"  # works well: downloaded all emails
+    user_email = "chuchudragon22@gmail.com"
     sanitized_email = user_email.replace('@', '_').replace('.', '_')
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f"{sanitized_email}_{timestamp}_emails.txt"
 
     service = get_gmail_service()
 
-    threads = get_threads_involving_user(service, user_email, max_results=100)
+    threads = get_threads_involving_user(service, user_email, max_results=2000)
 
     if not threads:
         print(f"No threads found involving {user_email}.")
