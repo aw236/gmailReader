@@ -8,6 +8,7 @@ from googleapiclient.errors import HttpError
 from email import policy
 from email.parser import BytesParser
 import html2text
+from datetime import datetime
 
 # Define the scopes (read-only access to Gmail)
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
@@ -29,10 +30,9 @@ def get_gmail_service():
     return build('gmail', 'v1', credentials=creds)
 
 
-def get_threads_involving_user(service, user_email, max_results=1000):
+def get_threads_involving_user(service, user_email, max_results=100):
     """Fetch threads involving a specific user."""
     try:
-        # Search for threads involving the specified user
         query = f'{user_email}'
         page_token = None
         all_threads = []
@@ -50,6 +50,25 @@ def get_threads_involving_user(service, user_email, max_results=1000):
         return []
 
 
+def clean_body_text(body):
+    """Clean up the email body by removing excessive line breaks and normalizing spacing."""
+    # Split into lines and strip whitespace
+    lines = [line.strip() for line in body.split('\n')]
+    # Remove empty lines
+    lines = [line for line in lines if line]
+    # Join lines with a single space, treating multiple line breaks as a single space
+    cleaned_body = ' '.join(lines)
+    return cleaned_body
+
+
+def remove_quoted_text(body):
+    """Remove quoted text from the email body."""
+    lines = body.split('\n')
+    cleaned_lines = [line for line in lines if not line.strip().startswith('>')]
+    cleaned_lines = [line for line in cleaned_lines if not line.strip().startswith('On ') or ' wrote:' not in line]
+    return '\n'.join(cleaned_lines).strip()
+
+
 def get_emails_in_thread(service, thread_id):
     """Fetch all emails in a thread and return metadata and plaintext content."""
     try:
@@ -58,34 +77,34 @@ def get_emails_in_thread(service, thread_id):
 
         email_data = []
         for msg in messages:
-            # Extract subject, date, and sender from headers
             headers = msg['payload']['headers']
             subject = next((header['value'] for header in headers if header['name'].lower() == 'subject'), 'No Subject')
             date = next((header['value'] for header in headers if header['name'].lower() == 'date'), 'No Date')
             sender = next((header['value'] for header in headers if header['name'].lower() == 'from'), 'Unknown Sender')
 
-            # Get the raw message for plaintext extraction
             raw_msg = service.users().messages().get(userId='me', id=msg['id'], format='raw').execute()
             msg_data = base64.urlsafe_b64decode(raw_msg['raw'].encode('ASCII'))
             msg_parsed = BytesParser(policy=policy.default).parsebytes(msg_data)
 
-            # Try to get the plaintext part
             plaintext_part = msg_parsed.get_body(preferencelist=('plain'))
             if plaintext_part:
                 body = plaintext_part.get_content().strip()
             else:
-                # Fall back to HTML part if plaintext is not available
                 html_part = msg_parsed.get_body(preferencelist=('html'))
                 if html_part:
                     html_content = html_part.get_content().strip()
-                    # Convert HTML to plaintext
                     h = html2text.HTML2Text()
-                    h.ignore_links = False  # Keep links in the text
+                    h.ignore_links = False
+                    h.body_width = 0  # Prevent html2text from wrapping lines
                     body = h.handle(html_content).strip()
                 else:
                     body = "No plaintext or HTML content found."
 
-            # Store the email data
+            # Remove quoted text first
+            body = remove_quoted_text(body)
+            # Clean up extra line breaks and spacing
+            body = clean_body_text(body)
+
             email_data.append({
                 'subject': subject,
                 'date': date,
@@ -100,7 +119,7 @@ def get_emails_in_thread(service, thread_id):
         return []
 
 
-def save_to_file(email_data, filename='emails.txt'):
+def save_to_file(email_data, user_email, filename):
     """Save the email metadata and plaintext to a file."""
     with open(filename, 'w', encoding='utf-8') as f:
         for i, email in enumerate(email_data, 1):
@@ -113,12 +132,14 @@ def save_to_file(email_data, filename='emails.txt'):
 
 
 if __name__ == '__main__':
-    # Replace with the email address of the sender you want to search for
-    user_email = "premierpadsrentals@gmail.com"  # Replace with the actual email address
+    user_email = "asdf123@gmail.com"
+    sanitized_email = user_email.replace('@', '_').replace('.', '_')
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"{sanitized_email}_{timestamp}_emails.txt"
+
     service = get_gmail_service()
 
-    # Get all threads involving the user
-    threads = get_threads_involving_user(service, user_email, max_results=1000)
+    threads = get_threads_involving_user(service, user_email, max_results=100)
 
     if not threads:
         print(f"No threads found involving {user_email}.")
@@ -129,7 +150,7 @@ if __name__ == '__main__':
             all_emails.extend(thread_emails)
 
         if all_emails:
-            save_to_file(all_emails)
-            print(f"Downloaded {len(all_emails)} emails and saved to 'emails.txt'.")
+            save_to_file(all_emails, user_email, filename)
+            print(f"Downloaded {len(all_emails)} emails and saved to '{filename}'.")
         else:
             print("No emails downloaded.")
