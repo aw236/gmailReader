@@ -148,10 +148,7 @@ def save_to_file(email_data, user_email, filename):
 
 
 if __name__ == '__main__':
-    # user_email = "premierpadsrentals@gmail.com" # works well
-    # user_email = "chuchudragon@gmail.com" # works well: No threads found involving chuchudragon@gmail.com.
-    # user_email = "chuchudragon22@gmail.com"  # works well: downloaded all emails
-    user_email = "chuchudragon22@gmail.com"
+    user_email = "asdf123@gmail.com"
     sanitized_email = user_email.replace('@', '_').replace('.', '_')
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f"{sanitized_email}_{timestamp}_emails.txt"
