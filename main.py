@@ -9,9 +9,29 @@ from email import policy
 from email.parser import BytesParser
 import html2text
 from datetime import datetime
+import time
+from tqdm import tqdm  # For progress bar
 
-# Define the scopes (read-only access to Gmail)
+# ------------------- Configuration Variables -------------------
+# Edit these variables to customize the script's behavior
+
+# Email address to search for
+# USER_EMAIL = "chuchudragon22@gmail.com" # works well
+USER_EMAIL = "asdf@gmail.com"
+
+# Date range for the search
+# Set to None for "all" emails, or specify a datetime object
+START_DATETIME = datetime(2024, 3, 29, 0, 0, 0)  # Example: March 1, 2025, 00:00:00
+END_DATETIME = "now"  # Options: "now", None, or a datetime object like datetime(2025, 3, 15, 23, 59, 59)
+
+# Maximum number of threads to fetch per API call
+MAX_RESULTS = 2000
+
+# Gmail API scopes (unlikely to change, but included for completeness)
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+
+
+# ---------------------------------------------------------------
 
 
 def get_gmail_service():
@@ -30,20 +50,57 @@ def get_gmail_service():
     return build('gmail', 'v1', credentials=creds)
 
 
-def get_threads_involving_user(service, user_email, max_results=2000):
-    """Fetch threads involving a specific user."""
+def datetime_to_epoch(dt):
+    """Convert a datetime object to epoch timestamp (seconds since Jan 1, 1970, UTC)."""
+    return int(dt.timestamp())
+
+
+def format_elapsed_time(seconds):
+    """Format elapsed time in seconds to a string (e.g., 'MM:SS')."""
+    minutes = int(seconds // 60)
+    seconds = int(seconds % 60)
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def get_threads_involving_user(service, user_email, max_results=MAX_RESULTS, start_datetime=None, end_datetime=None):
+    """Fetch threads involving a specific user within a date range."""
     try:
         query = f'{user_email}'
+        if start_datetime:
+            start_epoch = datetime_to_epoch(start_datetime)
+            query += f' after:{start_epoch}'
+        if end_datetime:
+            if end_datetime == "now":
+                end_epoch = datetime_to_epoch(datetime.now())
+            else:
+                end_epoch = datetime_to_epoch(end_datetime)
+            query += f' before:{end_epoch}'
+
+        # First, count the total number of threads to set up the progress bar
         page_token = None
-        all_threads = []
+        total_threads = 0
         while True:
             results = service.users().threads().list(userId='me', q=query, maxResults=max_results,
                                                      pageToken=page_token).execute()
             threads = results.get('threads', [])
-            all_threads.extend(threads)
+            total_threads += len(threads)
             page_token = results.get('nextPageToken')
             if not page_token:
                 break
+
+        # Now fetch threads with a progress bar
+        page_token = None
+        all_threads = []
+        with tqdm(total=total_threads, desc="Fetching threads", unit="thread") as pbar:
+            while True:
+                results = service.users().threads().list(userId='me', q=query, maxResults=max_results,
+                                                         pageToken=page_token).execute()
+                threads = results.get('threads', [])
+                all_threads.extend(threads)
+                pbar.update(len(threads))
+                page_token = results.get('nextPageToken')
+                if not page_token:
+                    break
         return all_threads
     except HttpError as error:
         print(f'An error occurred: {error}')
@@ -52,9 +109,7 @@ def get_threads_involving_user(service, user_email, max_results=2000):
 
 def clean_body_text(body):
     """Clean up the email body by preserving paragraph breaks and removing excessive spacing."""
-    # Split into lines and strip whitespace
     lines = [line.strip() for line in body.split('\n')]
-    # Remove excessive empty lines, but preserve single empty lines between paragraphs
     cleaned_lines = []
     previous_line_empty = False
     for line in lines:
@@ -62,30 +117,35 @@ def clean_body_text(body):
             cleaned_lines.append(line)
             previous_line_empty = False
         else:
-            if not previous_line_empty:  # Only add one empty line between paragraphs
+            if not previous_line_empty:
                 cleaned_lines.append('')
                 previous_line_empty = True
-    # Join lines with single newlines
     cleaned_body = '\n'.join(cleaned_lines).strip()
     return cleaned_body
 
 
 def remove_quoted_text(body):
-    """Remove quoted text, signatures, and footers from the email body."""
-    # Split into lines
+    """Remove quoted text, signatures, footers, and Avast links from the email body."""
     lines = body.split('\n')
-    # Remove lines starting with '>' (quoted text)
-    cleaned_lines = [line for line in lines if not line.strip().startswith('>')]
-    # Remove lines starting with "On [date], [sender] wrote:"
-    cleaned_lines = [line for line in cleaned_lines if not (line.strip().startswith('On ') and ' wrote:' in line)]
-    # Remove everything after a signature marker (e.g., "-- ")
+    cleaned_lines = []
+    for line in lines:
+        if 'www.avast.com' in line.lower():
+            continue
+        if '<#' in line and '#>' in line:
+            continue
+        if line.strip().startswith('>'):
+            continue
+        if line.strip().startswith('On ') and ' wrote:' in line:
+            continue
+        cleaned_lines.append(line)
+
     signature_index = next((i for i, line in enumerate(cleaned_lines) if line.strip().startswith('--')),
                            len(cleaned_lines))
     cleaned_lines = cleaned_lines[:signature_index]
     return '\n'.join(cleaned_lines).strip()
 
 
-def get_emails_in_thread(service, thread_id):
+def get_emails_in_thread(service, thread_id, email_counter, start_time, pbar):
     """Fetch all emails in a thread and return metadata and plaintext content."""
     try:
         thread = service.users().threads().get(userId='me', id=thread_id).execute()
@@ -116,9 +176,7 @@ def get_emails_in_thread(service, thread_id):
                 else:
                     body = "No plaintext or HTML content found."
 
-            # Remove quoted text and signatures
             body = remove_quoted_text(body)
-            # Clean up spacing while preserving paragraphs
             body = clean_body_text(body)
 
             email_data.append({
@@ -127,6 +185,15 @@ def get_emails_in_thread(service, thread_id):
                 'sender': sender,
                 'body': body
             })
+
+            # Update email counter and progress bar
+            email_counter[0] += 1
+            elapsed_time = time.time() - start_time
+            pbar.set_postfix({
+                'Emails': email_counter[0],
+                'Elapsed': format_elapsed_time(elapsed_time)
+            })
+            pbar.update(1)
 
         return email_data
 
@@ -148,25 +215,65 @@ def save_to_file(email_data, user_email, filename):
 
 
 if __name__ == '__main__':
-    user_email = "asdf123@gmail.com"
+    # Use the variables defined at the top
+    user_email = USER_EMAIL
+    start_datetime = START_DATETIME
+    end_datetime = END_DATETIME
+    max_results = MAX_RESULTS
+
+    # Construct the filename
     sanitized_email = user_email.replace('@', '_').replace('.', '_')
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"{sanitized_email}_{timestamp}_emails.txt"
+    if start_datetime:
+        start_date_str = start_datetime.strftime('%Y%m%d')
+    else:
+        start_date_str = "all"
+    if end_datetime == "now":
+        end_datetime_obj = datetime.now()
+        end_date_str = "now"
+    elif end_datetime:
+        end_datetime_obj = end_datetime
+        end_date_str = end_datetime.strftime('%Y%m%d')
+    else:
+        end_datetime_obj = datetime.now()
+        end_date_str = "now"
+    process_dttm = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"{sanitized_email}_from_{start_date_str}_to_{end_date_str}_processdttm_{process_dttm}_emails.txt"
+
+    # Start the timer
+    start_time = time.time()
 
     service = get_gmail_service()
 
-    threads = get_threads_involving_user(service, user_email, max_results=2000)
+    # Fetch threads
+    threads = get_threads_involving_user(
+        service,
+        user_email,
+        max_results=max_results,
+        start_datetime=start_datetime,
+        end_datetime=end_datetime
+    )
 
     if not threads:
-        print(f"No threads found involving {user_email}.")
+        print(f"No threads found involving {user_email} within the specified date range.")
     else:
-        all_emails = []
+        # Count total emails for progress bar
+        total_emails = 0
         for thread in threads:
-            thread_emails = get_emails_in_thread(service, thread['id'])
-            all_emails.extend(thread_emails)
+            thread_data = service.users().threads().get(userId='me', id=thread['id']).execute()
+            total_emails += len(thread_data.get('messages', []))
+
+        # Process emails with progress bar
+        all_emails = []
+        email_counter = [0]  # Use a list to allow modification in the function
+        with tqdm(total=total_emails, desc="Processing emails", unit="email") as pbar:
+            for thread in threads:
+                thread_emails = get_emails_in_thread(service, thread['id'], email_counter, start_time, pbar)
+                all_emails.extend(thread_emails)
 
         if all_emails:
             save_to_file(all_emails, user_email, filename)
+            elapsed_time = time.time() - start_time
             print(f"Downloaded {len(all_emails)} emails and saved to '{filename}'.")
+            print(f"Total elapsed time: {format_elapsed_time(elapsed_time)}")
         else:
             print("No emails downloaded.")
