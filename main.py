@@ -10,26 +10,14 @@ from email.parser import BytesParser
 import html2text
 from datetime import datetime
 import time
-from tqdm import tqdm  # For progress bar
+from tqdm import tqdm
 
 # ------------------- Configuration Variables -------------------
-# Edit these variables to customize the script's behavior
-
-# Email address to search for
-# USER_EMAIL = "chuchudragon22@gmail.com" # works well
-USER_EMAIL = "asdf@gmail.com"
-
-# Date range for the search
-# Set to None for "all" emails, or specify a datetime object
-START_DATETIME = datetime(2024, 3, 29, 0, 0, 0)  # Example: March 1, 2025, 00:00:00
-END_DATETIME = "now"  # Options: "now", None, or a datetime object like datetime(2025, 3, 15, 23, 59, 59)
-
-# Maximum number of threads to fetch per API call
+USER_EMAIL = "asdf123@gmail.com"
+START_DATETIME = datetime(2024, 3, 29, 0, 0, 0)
+END_DATETIME = "now"
 MAX_RESULTS = 2000
-
-# Gmail API scopes (unlikely to change, but included for completeness)
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
-
 
 # ---------------------------------------------------------------
 
@@ -51,7 +39,7 @@ def get_gmail_service():
 
 
 def datetime_to_epoch(dt):
-    """Convert a datetime object to epoch timestamp (seconds since Jan 1, 1970, UTC)."""
+    """Convert a datetime object to epoch timestamp."""
     return int(dt.timestamp())
 
 
@@ -76,7 +64,6 @@ def get_threads_involving_user(service, user_email, max_results=MAX_RESULTS, sta
                 end_epoch = datetime_to_epoch(end_datetime)
             query += f' before:{end_epoch}'
 
-        # First, count the total number of threads to set up the progress bar
         page_token = None
         total_threads = 0
         while True:
@@ -88,7 +75,6 @@ def get_threads_involving_user(service, user_email, max_results=MAX_RESULTS, sta
             if not page_token:
                 break
 
-        # Now fetch threads with a progress bar
         page_token = None
         all_threads = []
         with tqdm(total=total_threads, desc="Fetching threads", unit="thread") as pbar:
@@ -145,8 +131,21 @@ def remove_quoted_text(body):
     return '\n'.join(cleaned_lines).strip()
 
 
+def count_attachments(payload):
+    """Count the number of attachments in the email payload."""
+    attachment_count = 0
+    if 'parts' in payload:
+        for part in payload.get('parts', []):
+            # Check if the part has a filename and is not a text/plain or text/html part
+            if (part.get('filename') and part.get('mimeType') not in ['text/plain', 'text/html']):
+                attachment_count += 1
+            # Recursively check nested parts (e.g., multipart/mixed)
+            attachment_count += count_attachments(part)
+    return attachment_count
+
+
 def get_emails_in_thread(service, thread_id, email_counter, start_time, pbar):
-    """Fetch all emails in a thread and return metadata and plaintext content."""
+    """Fetch all emails in a thread and return metadata, plaintext content, and attachment count."""
     try:
         thread = service.users().threads().get(userId='me', id=thread_id).execute()
         messages = thread.get('messages', [])
@@ -157,6 +156,7 @@ def get_emails_in_thread(service, thread_id, email_counter, start_time, pbar):
             subject = next((header['value'] for header in headers if header['name'].lower() == 'subject'), 'No Subject')
             date = next((header['value'] for header in headers if header['name'].lower() == 'date'), 'No Date')
             sender = next((header['value'] for header in headers if header['name'].lower() == 'from'), 'Unknown Sender')
+            recipient = next((header['value'] for header in headers if header['name'].lower() == 'to'), 'Unknown Recipient')
 
             raw_msg = service.users().messages().get(userId='me', id=msg['id'], format='raw').execute()
             msg_data = base64.urlsafe_b64decode(raw_msg['raw'].encode('ASCII'))
@@ -179,14 +179,18 @@ def get_emails_in_thread(service, thread_id, email_counter, start_time, pbar):
             body = remove_quoted_text(body)
             body = clean_body_text(body)
 
+            # Count attachments in the payload
+            attachment_count = count_attachments(msg['payload'])
+
             email_data.append({
                 'subject': subject,
                 'date': date,
                 'sender': sender,
-                'body': body
+                'recipient': recipient,
+                'body': body,
+                'attachments': attachment_count  # Added attachment count
             })
 
-            # Update email counter and progress bar
             email_counter[0] += 1
             elapsed_time = time.time() - start_time
             pbar.set_postfix({
@@ -203,25 +207,25 @@ def get_emails_in_thread(service, thread_id, email_counter, start_time, pbar):
 
 
 def save_to_file(email_data, user_email, filename):
-    """Save the email metadata and plaintext to a file."""
+    """Save the email metadata, plaintext, and attachment count to a file."""
     with open(filename, 'w', encoding='utf-8') as f:
         for i, email in enumerate(email_data, 1):
             f.write(f"Email {i}:\n")
             f.write(f"Subject: {email['subject']}\n")
             f.write(f"Date: {email['date']}\n")
             f.write(f"Sender: {email['sender']}\n")
+            f.write(f"Recipient: {email['recipient']}\n")
+            f.write(f"Attachments: {email['attachments']}\n")  # Added attachment count
             f.write(f"Body:\n{email['body']}\n")
             f.write(f"{'-' * 50}\n")
 
 
 if __name__ == '__main__':
-    # Use the variables defined at the top
     user_email = USER_EMAIL
     start_datetime = START_DATETIME
     end_datetime = END_DATETIME
     max_results = MAX_RESULTS
 
-    # Construct the filename
     sanitized_email = user_email.replace('@', '_').replace('.', '_')
     if start_datetime:
         start_date_str = start_datetime.strftime('%Y%m%d')
@@ -239,12 +243,10 @@ if __name__ == '__main__':
     process_dttm = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f"{sanitized_email}_from_{start_date_str}_to_{end_date_str}_processdttm_{process_dttm}_emails.txt"
 
-    # Start the timer
     start_time = time.time()
 
     service = get_gmail_service()
 
-    # Fetch threads
     threads = get_threads_involving_user(
         service,
         user_email,
@@ -256,15 +258,13 @@ if __name__ == '__main__':
     if not threads:
         print(f"No threads found involving {user_email} within the specified date range.")
     else:
-        # Count total emails for progress bar
         total_emails = 0
         for thread in threads:
             thread_data = service.users().threads().get(userId='me', id=thread['id']).execute()
             total_emails += len(thread_data.get('messages', []))
 
-        # Process emails with progress bar
         all_emails = []
-        email_counter = [0]  # Use a list to allow modification in the function
+        email_counter = [0]
         with tqdm(total=total_emails, desc="Processing emails", unit="email") as pbar:
             for thread in threads:
                 thread_emails = get_emails_in_thread(service, thread['id'], email_counter, start_time, pbar)
